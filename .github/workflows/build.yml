@@ -22,7 +22,7 @@ jobs:
     # Oldest available runner, so the built .so files run on older glibc too.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build dependencies
         run: |
@@ -74,7 +74,7 @@ jobs:
           sha256sum "$OUT.tar.xz" > "$OUT.tar.xz.sha256"
           cat "$OUT.tar.xz.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: openrmh-wine-${{ env.WINE_VERSION }}
           path: openrmh-wine-${{ env.WINE_VERSION }}.tar.xz*
