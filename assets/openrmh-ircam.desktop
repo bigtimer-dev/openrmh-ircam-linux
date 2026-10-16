@@ -6,5 +6,5 @@ Comment=Live view and analysis for USB thermal cameras (OpenRMH-IRCAM under Wine
 Exec=@BIN@
 Icon=openrmh-ircam
 Terminal=false
-Categories=Graphics;Science;Engineering;
+Categories=Science;Engineering;
 StartupWMClass=ircam thermal viewer.exe
