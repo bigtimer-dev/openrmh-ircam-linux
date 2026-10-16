@@ -1,0 +1,89 @@
+name: Build patched Wine
+
+# Builds the three patched Wine files from upstream Wine source + patches/,
+# drops them into Kron4ek's portable vanilla Wine build of the same version,
+# and publishes the result as a release asset that install.sh downloads.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  WINE_VERSION: "11.17"
+  WINE_SRC_SHA256: "8e752e29bba2901ad9f915139345c6ee67184b099d425704d915971ca5c055fc"
+  KRON4EK_SHA256: "3211db09086bc6fbd769c0286f27790b32d6fc6fb0bc610dad6b59796f07d462"
+
+jobs:
+  build:
+    # Oldest available runner, so the built .so files run on older glibc too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison clang lld libv4l-dev xz-utils
+
+      - name: Download and verify sources
+        run: |
+          curl -fsSLO "https://dl.winehq.org/wine/source/11.x/wine-${WINE_VERSION}.tar.xz"
+          echo "${WINE_SRC_SHA256}  wine-${WINE_VERSION}.tar.xz" | sha256sum -c
+          curl -fsSLO "https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64-wow64.tar.xz"
+          echo "${KRON4EK_SHA256}  wine-${WINE_VERSION}-amd64-wow64.tar.xz" | sha256sum -c
+
+      - name: Patch and build qcap, avicap32 and opengl32
+        run: |
+          tar xf "wine-${WINE_VERSION}.tar.xz"
+          cd "wine-${WINE_VERSION}"
+          patch -p1 < "../patches/wine-${WINE_VERSION}-openrmh.patch"
+          ./configure --enable-win64 --disable-tests \
+            --without-x --without-wayland --without-freetype --without-gstreamer --without-cups \
+            --without-sane --without-pulse --without-alsa --without-vulkan --without-opencl \
+            --without-pcap --without-krb5 --without-gssapi --without-netapi --without-sdl \
+            --without-usb --without-ffmpeg --without-dbus --without-gnutls --without-fontconfig \
+            --without-opengl
+          grep -q 'define SONAME_LIBV4L2' include/config.h
+          make -j"$(nproc)" dlls/qcap/qcap.so dlls/avicap32/avicap32.so \
+            dlls/opengl32/x86_64-windows/opengl32.dll
+
+      - name: Package
+        run: |
+          OUT="openrmh-wine-${WINE_VERSION}"
+          tar xf "wine-${WINE_VERSION}-amd64-wow64.tar.xz"
+          mv "wine-${WINE_VERSION}-amd64-wow64" "$OUT"
+          SRC="wine-${WINE_VERSION}/dlls"
+          install -m755 "$SRC/qcap/qcap.so" "$SRC/avicap32/avicap32.so" "$OUT/lib/wine/x86_64-unix/"
+          strip --strip-unneeded "$OUT/lib/wine/x86_64-unix/qcap.so" "$OUT/lib/wine/x86_64-unix/avicap32.so"
+          install -m644 "$SRC/opengl32/x86_64-windows/opengl32.dll" "$OUT/lib/wine/x86_64-windows/"
+          cp "patches/wine-${WINE_VERSION}-openrmh.patch" "$OUT/"
+          cat > "$OUT/README.OpenRMH" <<EOF
+          Wine ${WINE_VERSION} (Kron4ek's portable vanilla build, https://github.com/Kron4ek/Wine-Builds)
+          with lib/wine/x86_64-unix/qcap.so, lib/wine/x86_64-unix/avicap32.so and
+          lib/wine/x86_64-windows/opengl32.dll rebuilt from the Wine ${WINE_VERSION} source
+          (https://dl.winehq.org/wine/source/11.x/wine-${WINE_VERSION}.tar.xz) with
+          wine-${WINE_VERSION}-openrmh.patch applied. Wine is licensed under the LGPL 2.1.
+          Built by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          tar cJf "$OUT.tar.xz" "$OUT"
+          sha256sum "$OUT.tar.xz" > "$OUT.tar.xz.sha256"
+          cat "$OUT.tar.xz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openrmh-wine-${{ env.WINE_VERSION }}
+          path: openrmh-wine-${{ env.WINE_VERSION }}.tar.xz*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md \
+            "openrmh-wine-${WINE_VERSION}.tar.xz" "openrmh-wine-${WINE_VERSION}.tar.xz.sha256"

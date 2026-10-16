@@ -1,0 +1,179 @@
+--- a/dlls/qcap/v4l.c
++++ b/dlls/qcap/v4l.c
+@@ -236,12 +236,15 @@
+ {
+     const struct get_media_type_params *params = args;
+     struct video_capture_device *device = get_device(params->device);
+-    unsigned int caps_count = (device->current_caps) ? 1 : device->caps_count;
++    /* OpenRMH: like Windows, offer every format until one has actually been set,
++     * not just the default picked when the device was probed. */
++    BOOL only_current = device->current_caps && device->started;
++    unsigned int caps_count = only_current ? 1 : device->caps_count;
+ 
+     if (params->index >= caps_count)
+         return VFW_S_NO_MORE_ITEMS;
+ 
+-    if (device->current_caps)
++    if (only_current)
+     {
+         *params->mt = device->current_caps->media_type;
+         *params->format = device->current_caps->video_info;
+@@ -365,7 +368,11 @@
+         }
+     }
+ 
+-    reverse_image(device, params->data, device->image_data);
++    /* OpenRMH: YUY2 is top-down and carries raw sensor data, so pass it through untouched. */
++    if (device->current_caps->pixelformat == V4L2_PIX_FMT_YUYV)
++        memcpy(params->data, device->image_data, device->image_size);
++    else
++        reverse_image(device, params->data, device->image_data);
+     return TRUE;
+ }
+ 
+@@ -374,7 +381,8 @@
+ static void fill_caps(__u32 pixelformat, __u32 width, __u32 height,
+         LONGLONG max_frame_interval, LONGLONG min_frame_interval, struct caps *caps)
+ {
+-    LONG depth = 24;
++    BOOL yuy2 = (pixelformat == V4L2_PIX_FMT_YUYV);
++    LONG depth = yuy2 ? 16 : 24;
+ 
+     memset(caps, 0, sizeof(*caps));
+     caps->video_info.dwBitRate = width * height * depth * TICKSPERSEC / min_frame_interval;
+@@ -383,10 +391,10 @@
+     caps->video_info.bmiHeader.biHeight = height;
+     caps->video_info.bmiHeader.biPlanes = 1;
+     caps->video_info.bmiHeader.biBitCount = depth;
+-    caps->video_info.bmiHeader.biCompression = BI_RGB;
++    caps->video_info.bmiHeader.biCompression = yuy2 ? MAKEFOURCC('Y','U','Y','2') : BI_RGB;
+     caps->video_info.bmiHeader.biSizeImage = width * height * depth / 8;
+     caps->media_type.majortype = MEDIATYPE_Video;
+-    caps->media_type.subtype = MEDIASUBTYPE_RGB24;
++    caps->media_type.subtype = yuy2 ? MEDIASUBTYPE_YUY2 : MEDIASUBTYPE_RGB24;
+     caps->media_type.bFixedSizeSamples = TRUE;
+     caps->media_type.bTemporalCompression = FALSE;
+     caps->media_type.lSampleSize = width * height * depth / 8;
+@@ -526,15 +534,22 @@
+         goto error;
+     }
+ 
+-    format.fmt.pix.pixelformat = V4L2_PIX_FMT_BGR24;
++    /* OpenRMH: prefer native YUYV (offered alone, as YUY2) so thermal cameras deliver
++     * their raw sensor data; libv4l2 never emulates YUYV, so success means native. */
++    format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+     if (xioctl(fd, VIDIOC_TRY_FMT, &format) == -1
+-            || format.fmt.pix.pixelformat != V4L2_PIX_FMT_BGR24)
++            || format.fmt.pix.pixelformat != V4L2_PIX_FMT_YUYV)
+     {
+-        ERR("This device doesn't support V4L2_PIX_FMT_BGR24 format.\n");
+-        goto error;
++        format.fmt.pix.pixelformat = V4L2_PIX_FMT_BGR24;
++        if (xioctl(fd, VIDIOC_TRY_FMT, &format) == -1
++                || format.fmt.pix.pixelformat != V4L2_PIX_FMT_BGR24)
++        {
++            ERR("This device doesn't support V4L2_PIX_FMT_BGR24 format.\n");
++            goto error;
++        }
+     }
+ 
+-    frmsize.pixel_format = V4L2_PIX_FMT_BGR24;
++    frmsize.pixel_format = format.fmt.pix.pixelformat;
+     while (xioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize) != -1)
+     {
+         LONGLONG max_frame_interval = 0, min_frame_interval = LLONG_MAX;
+--- a/dlls/avicap32/v4l.c
++++ b/dlls/avicap32/v4l.c
+@@ -104,10 +104,16 @@
+         if (is_capture_device)
+         {
+             char version[CAP_DESC_MAX];
++            char *card = (char *)caps.card;
++            size_t card_len = strlen(card);
+             int ret;
+ 
+-            v4l_umbstowcs((char *)caps.card, strlen((char *)caps.card),
+-                    params->name, ARRAY_SIZE(params->name));
++            /* OpenRMH: uvcvideo reports "Name: Name"; Windows calls the same device "Name". */
++            if (card_len > 2 && card_len % 2 == 0 && !memcmp(card + card_len / 2 - 1, ": ", 2)
++                    && !memcmp(card, card + card_len / 2 + 1, card_len / 2 - 1))
++                card_len = card_len / 2 - 1;
++
++            v4l_umbstowcs(card, card_len, params->name, ARRAY_SIZE(params->name));
+ 
+             ret = snprintf(version, ARRAY_SIZE(version), "%s v%u.%u.%u", (char *)caps.driver,
+                     (caps.version >> 16) & 0xff, (caps.version >> 8) & 0xff, caps.version & 0xff);
+--- a/dlls/opengl32/thunks.c
++++ b/dlls/opengl32/thunks.c
+@@ -119,9 +119,60 @@
+ void WINAPI glCallLists( GLsizei n, GLenum type, const void *lists )
+ {
+     struct glCallLists_params args = { .teb = NtCurrentTeb(), .n = n, .type = type, .lists = lists };
++    struct glListBase_params base_args = { .teb = NtCurrentTeb() };
++    GLint base = 0, compiling = 0;
++    GLuint *ids = NULL;
+     NTSTATUS status;
+     TRACE( "n %d, type %d, lists %p\n", n, type, lists );
++
++    /* OpenRMH: map base + offset through the current context's display list table, like
++     * glCallList does, so names that only exist in another (unshared) context draw nothing
++     * as on Windows instead of hitting that context's lists. */
++    glGetIntegerv( GL_LIST_INDEX, &compiling );
++    if (n > 0 && lists && !compiling && (ids = malloc( n * sizeof(*ids) )))
++    {
++        BOOL supported = TRUE;
++        GLsizei i;
++
++        glGetIntegerv( GL_LIST_BASE, &base );
++        for (i = 0; i < n && supported; i++)
++        {
++            switch (type)
++            {
++            case GL_BYTE:           ids[i] = (GLuint)base + ((const GLbyte *)lists)[i]; break;
++            case GL_UNSIGNED_BYTE:  ids[i] = (GLuint)base + ((const GLubyte *)lists)[i]; break;
++            case GL_SHORT:          ids[i] = (GLuint)base + ((const GLshort *)lists)[i]; break;
++            case GL_UNSIGNED_SHORT: ids[i] = (GLuint)base + ((const GLushort *)lists)[i]; break;
++            case GL_INT:            ids[i] = (GLuint)base + ((const GLint *)lists)[i]; break;
++            case GL_UNSIGNED_INT:   ids[i] = (GLuint)base + ((const GLuint *)lists)[i]; break;
++            case GL_FLOAT:          ids[i] = (GLuint)base + (GLint)((const GLfloat *)lists)[i]; break;
++            default:                supported = FALSE; break;
++            }
++        }
++
++        if (supported)
++        {
++            map_context_objects( OBJ_TYPE_DISPLAY_LIST, n, ids );
++            base_args.base = 0;
++            UNIX_CALL( glListBase, &base_args );
++            args.type = GL_UNSIGNED_INT;
++            args.lists = ids;
++        }
++        else
++        {
++            free( ids );
++            ids = NULL;
++        }
++    }
++
+     if ((status = UNIX_CALL( glCallLists, &args ))) WARN( "glCallLists returned %#lx\n", status );
++
++    if (ids)
++    {
++        base_args.base = base;
++        UNIX_CALL( glListBase, &base_args );
++        free( ids );
++    }
+     set_context_attribute( -1 /* unsupported */, NULL, 0 );
+ }
+ 
+@@ -1432,7 +1483,9 @@
+     struct glListBase_params args = { .teb = NtCurrentTeb() };
+     NTSTATUS status;
+     TRACE( "base %d\n", base );
+-    args.base = *map_context_objects( OBJ_TYPE_DISPLAY_LIST, 1, &base );
++    /* OpenRMH: the list base is an offset (often negative, e.g. base - 32 for fonts),
++     * not a display list name, so it must not be translated as one. */
++    args.base = base;
+     if ((status = UNIX_CALL( glListBase, &args ))) WARN( "glListBase returned %#lx\n", status );
+     set_context_attribute( -1 /* unsupported */, NULL, 0 );
+ }

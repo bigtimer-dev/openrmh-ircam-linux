@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=IRCAM Thermal Viewer
+GenericName=Thermal Camera Viewer
+Comment=Live view and analysis for USB thermal cameras (OpenRMH-IRCAM under Wine)
+Exec=@BIN@
+Icon=openrmh-ircam
+Terminal=false
+Categories=Graphics;Science;Engineering;
+StartupWMClass=ircam thermal viewer.exe

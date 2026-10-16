@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Starts IRCAM Thermal Viewer (OpenRMH-IRCAM) under its camera-patched Wine.
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/openrmh-ircam"
+[ -x "$DATA_DIR/wine/bin/wine" ] || { echo "OpenRMH-IRCAM is not installed (run install.sh)." >&2; exit 1; }
+export WINEPREFIX="$DATA_DIR/prefix"
+export WINEDEBUG="${WINEDEBUG:--all}"
+export PATH="$DATA_DIR/wine/bin:$PATH"
+cd "$DATA_DIR/app" || exit 1
+exec "$DATA_DIR/wine/bin/wine" "IRCAM Thermal Viewer.exe" "$@"
